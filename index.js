@@ -1,127 +1,96 @@
 // index.js
 require('dotenv').config();
 const express = require('express');
-const { MongoClient } = require('mongodb');
+const mongoose = require('mongoose');
 const cors = require('cors');
-const morgan = require('morgan');
 
 const app = express();
 
-// ====== CONFIG BÁSICA ======
-const PORT = process.env.PORT || 10000; // Render pondrá su propio puerto
+// ===== Middlewares =====
+app.use(cors());
+app.use(express.json());
+
+// ===== Configuración de Mongo =====
+// Usa la base ColdChainFleetUp y la colección telemetria.mst01
 const MONGO_URI = process.env.MONGO_URI;
 
-if (!MONGO_URI) {
-  console.error('❌ Falta la variable de entorno MONGO_URI');
-  process.exit(1);
-}
+mongoose
+  .connect(MONGO_URI, {
+    // estas opciones son seguras en Mongoose 7+
+  })
+  .then(() => {
+    console.log('✔ Conectado a MongoDB Atlas');
+  })
+  .catch((err) => {
+    console.error('✖ Error conectando a Mongo', err);
+  });
 
-// En Atlas tu DB es "telemetria" y la colección "mst01"
-const DB_NAME = process.env.MONGO_DB_NAME || 'telemetria';
-const COLLECTION_NAME = process.env.MONGO_COLLECTION || 'mst01';
-
-// Middlewares
-app.use(express.json());
-app.use(cors());
-app.use(morgan('dev'));
-
-let telemetryCollection;
-
-// ====== CONEXIÓN A MONGODB ATLAS ======
-async function connectToMongo() {
-  try {
-    console.log('🔌 Conectando a MongoDB Atlas...');
-    const client = new MongoClient(MONGO_URI);
-    await client.connect();
-    const db = client.db(DB_NAME);
-    telemetryCollection = db.collection(COLLECTION_NAME);
-    console.log(
-      `✅ Conectado a MongoDB Atlas. DB="${DB_NAME}", Collection="${COLLECTION_NAME}"`
-    );
-  } catch (err) {
-    console.error('❌ Error conectando a Mongo:', err);
-    process.exit(1);
+// Definimos el esquema para los documentos de telemetría
+const telemetrySchema = new mongoose.Schema(
+  {
+    deviceMac: { type: String, required: true },
+    temperature: { type: Number, required: true },
+    humidity: { type: Number, required: false },
+    timestamp: { type: Date, required: true },
+    raw: { type: Object }, // por si quieres guardar el json completo
+  },
+  {
+    collection: 'mst01', // 👈 colección dentro de la base "telemetria"
   }
-}
+);
 
-// ====== ENDPOINTS ======
+// Nota: en Atlas tu proyecto es "ColdChainFleetUp" y dentro tienes la DB "telemetria".
+// Para forzar esa DB:
+const TelemetryModel = mongoose.model('Telemetry', telemetrySchema, 'mst01');
 
-// Health-check simple
+// ===== Rutas =====
+
+// Ruta simple para probar que el backend está vivo
 app.get('/', (req, res) => {
-  res.send('API MST01 OK ✔️');
+  res.send('MST01 backend OK');
 });
 
-// Otra ruta de prueba rápida (útil para probar desde el navegador)
-app.get('/api/telemetry/ping', (req, res) => {
-  res.json({ ok: true, message: 'PONG desde backend MST01' });
-});
-
-// 👉 Endpoint donde pega la app Android
+// 👇 ESTA es la ruta que llama tu app Android:
 app.post('/api/telemetry', async (req, res) => {
   try {
-    if (!telemetryCollection) {
-      return res
-        .status(500)
-        .json({ error: 'BD no inicializada todavía' });
-    }
+    const payload = req.body;
 
-    const { deviceMac, temperature, humidity, timestamp } = req.body;
+    console.log('📥 Telemetría recibida:', payload);
 
-    if (!deviceMac || typeof temperature === 'undefined') {
-      return res.status(400).json({
-        error: 'Campos requeridos: deviceMac y temperature',
-      });
-    }
-
-    const now = new Date();
-
+    // Normalizamos campos
     const doc = {
-      deviceMac,
-      temperature,
-      humidity: typeof humidity === 'number' ? humidity : null,
-      timestamp: timestamp ? new Date(timestamp) : now, // del dispositivo
-      receivedAt: now, // cuándo lo recibió el backend
+      deviceMac: payload.deviceMac || 'UNKNOWN',
+      temperature: payload.temperature,
+      humidity:
+        typeof payload.humidity === 'number'
+          ? payload.humidity
+          : undefined,
+      timestamp: payload.timestamp
+        ? new Date(payload.timestamp)
+        : new Date(),
+      raw: payload,
     };
 
-    const result = await telemetryCollection.insertOne(doc);
+    const saved = await TelemetryModel.create(doc);
+
+    console.log('💾 Telemetría almacenada con _id:', saved._id);
 
     res.status(201).json({
       ok: true,
-      id: result.insertedId,
+      id: saved._id,
     });
   } catch (err) {
-    console.error('❌ Error en POST /api/telemetry:', err);
-    res.status(500).json({ error: 'Error interno del servidor' });
+    console.error('❌ Error guardando telemetría', err);
+    res.status(500).json({
+      ok: false,
+      error: 'Error guardando telemetría',
+    });
   }
 });
 
-// Endpoint para ver los últimos N registros (debug rápido)
-app.get('/api/telemetry/last', async (req, res) => {
-  try {
-    if (!telemetryCollection) {
-      return res
-        .status(500)
-        .json({ error: 'BD no inicializada todavía' });
-    }
+// ===== Arranque del servidor =====
+const PORT = process.env.PORT || 10000;
 
-    const limit = parseInt(req.query.limit || '20', 10);
-
-    const docs = await telemetryCollection
-      .find({})
-      .sort({ receivedAt: -1 })
-      .limit(limit)
-      .toArray();
-
-    res.json(docs);
-  } catch (err) {
-    console.error('❌ Error en GET /api/telemetry/last:', err);
-    res.status(500).json({ error: 'Error interno del servidor' });
-  }
-});
-
-// ====== ARRANCAR SERVIDOR ======
-connectToMongo().then(() => {
-  app.listen(PORT, () => {
-    console.log(`🌡️ API MST01 escuchando en el puerto ${PORT}`);
-  });
+app.listen(PORT, () => {
+  console.log(`🌡️ API MST01 escuchando en el puerto ${PORT}`);
 });
