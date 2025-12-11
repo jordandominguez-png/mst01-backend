@@ -71,13 +71,25 @@ app.post('/api/telemetry', async (req, res) => {
 
     const now = new Date();
 
+    // 🔹 Normalizamos siempre a milisegundos y guardamos ambas formas
+    const tsMs =
+      typeof timestamp === 'number'
+        ? timestamp
+        : Date.now(); // por si algún día la app no manda timestamp
+
     const doc = {
       deviceMac,
       temperature,
       humidity: typeof humidity === 'number' ? humidity : null,
-      timestamp: timestamp ? new Date(timestamp) : now, // tiempo enviado por el teléfono
-      receivedAt: now,                                  // tiempo en que llegó al backend
-      raw: payload,                                     // payload completo para referencia
+
+      // 👇 timestamp bonito tipo Date para BI
+      timestamp: new Date(tsMs),
+
+      // 👇 timestamp crudo en milisegundos (por si lo necesitas después)
+      timestampMs: tsMs,
+
+      receivedAt: now,   // tiempo en que llegó al backend
+      raw: payload,      // payload completo para referencia
     };
 
     const result = await telemetryCollection.insertOne(doc);
